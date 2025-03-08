@@ -18,8 +18,8 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
 
 # 腾讯云API密钥 (注意: 实际应用中应存储在环境变量或配置文件中)
-SECRET_ID = "AKIDnOnzyBIF2c1HLIDyVotnV0KTcdR2QdeU"
-SECRET_KEY = "g8RefV9dzA9i7NWSCkfR0MUP7c0CAvTo"
+SECRET_ID = "your id"
+SECRET_KEY = "your key"
 
 # 常用中文停用词列表
 CHINESE_STOP_WORDS = [
