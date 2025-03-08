@@ -17,9 +17,6 @@
 2024党外人士座谈会
 2025年2月17日 民营企业座谈会
 
-<img width="311" alt="image" src="https://github.com/user-attachments/assets/1aa4187e-46ff-45dc-be58-e2e30ab0677a" />
-
-<img width="416" alt="image" src="https://github.com/user-attachments/assets/60f2a654-7d0b-49c8-9b27-b8a162e08408" />
 
 
 
