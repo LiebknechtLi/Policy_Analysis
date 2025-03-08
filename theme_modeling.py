@@ -83,13 +83,21 @@ def preprocess_chinese_text(texts):
     return segmented_texts
 
 
-def extract_keywords_with_jieba(text, topK=20):
-    """使用jieba提取关键词"""
-    # 使用TF-IDF算法提取关键词
-    keywords_tfidf = jieba.analyse.extract_tags(text, topK=topK, withWeight=True)
+def extract_keywords_with_jieba(text, topK=40):
+    """使用jieba提取关键词，并确保捕获关键短语"""
+    # 增加关键词数量
+    keywords_tfidf = jieba.analyse.extract_tags(text, topK=topK * 2, withWeight=True)
+    keywords_textrank = jieba.analyse.textrank(text, topK=topK * 2, withWeight=True)
 
-    # 使用TextRank算法提取关键词
-    keywords_textrank = jieba.analyse.textrank(text, topK=topK, withWeight=True)
+    # 确保关键短语被识别
+    jieba.add_word("民营经济")
+    jieba.add_word("民营企业")
+    jieba.add_word("经济发展")
+    jieba.add_word("高质量发展")
+
+    # 手动检查文本中的关键短语
+    important_phrases = ["民营经济", "民营企业", "经济发展", "高质量发展",
+                         "创新", "发展", "市场", "改革", "政策", "支持"]
 
     # 合并两种算法的结果
     keywords = {}
@@ -98,14 +106,22 @@ def extract_keywords_with_jieba(text, topK=20):
 
     for word, weight in keywords_textrank:
         if word in keywords:
-            # 取两种算法权重的平均值
             keywords[word] = (keywords[word] + weight) / 2
         else:
             keywords[word] = weight
 
+    # 确保重要短语被包含
+    for phrase in important_phrases:
+        if phrase in text and phrase not in keywords:
+            keywords[phrase] = 0.5  # 给予中等权重
+
     # 按权重排序
     sorted_keywords = sorted(keywords.items(), key=lambda x: x[1], reverse=True)
-    return [word for word, _ in sorted_keywords[:topK]]
+    result = [word for word, _ in sorted_keywords[:topK]]
+
+    # 调试输出
+    print(f"提取的关键词数量: {len(result)}")
+    return result
 
 
 def chinese_lda_topic_modeling(texts, n_topics=5):
@@ -116,8 +132,8 @@ def chinese_lda_topic_modeling(texts, n_topics=5):
     # 创建TF-IDF向量化器
     vectorizer = TfidfVectorizer(
         max_features=2000,  # 限制特征数量
-        min_df=1,  # 至少出现在2个文档中
-        max_df=1.0  # 最多出现在90%的文档中
+        min_df=1,
+        max_df=1.0
     )
 
     # 转换文本为TF-IDF矩阵
@@ -174,6 +190,18 @@ def calculate_relevance_score(text, target_keywords=None):
         # 默认"民营经济发展"相关关键词
         target_keywords = ["民营", "经济", "发展", "企业", "创新", "支持", "政策", "扶持", "改革", "市场"]
 
+    # 添加关键短语为整体匹配
+    extended_target_keywords = target_keywords + ["民营经济", "民营企业", "经济发展", "高质量发展"]
+
+    # 对原文本进行简单的预处理，确保能识别关键短语
+    processed_text = text
+
+    # 直接检查原文中是否包含关键词和短语
+    content_based_matches = []
+    for keyword in extended_target_keywords:
+        if keyword in processed_text:
+            content_based_matches.append(keyword)
+
     # 将文本分成小段
     segments = split_text(text)
 
@@ -183,7 +211,7 @@ def calculate_relevance_score(text, target_keywords=None):
 
     # 1. 使用jieba直接提取关键词
     text_keywords = extract_keywords_with_jieba(text)
-    print(f"文本关键词: {text_keywords}")
+    print(f"文本关键词: {text_keywords[:20]}...")  # 只显示前20个关键词
 
     # 2. 尝试使用LDA主题模型
     lda_model, vectorizer = chinese_lda_topic_modeling(segments)
@@ -191,8 +219,21 @@ def calculate_relevance_score(text, target_keywords=None):
 
     # 3. 计算关键词匹配分数
     # 3.1 直接关键词匹配
-    direct_matches = set(target_keywords).intersection(text_keywords)
-    direct_score = len(direct_matches) / len(target_keywords) * 10  # 转换为0-10的分数
+    direct_matches = set(extended_target_keywords).intersection(text_keywords)
+    # 如果关键词提取失败但原文确实包含关键词，使用直接内容匹配结果
+    if len(direct_matches) == 0 and len(content_based_matches) > 0:
+        direct_matches = set(content_based_matches)
+        print("使用内容直接匹配替代关键词匹配")
+
+    # 计算直接匹配分数，但给予"民营经济"这样的短语更高权重
+    direct_match_score = 0
+    for match in direct_matches:
+        if match in ["民营经济", "经济发展", "高质量发展", "民营企业"]:
+            direct_match_score += 2  # 关键短语权重加倍
+        else:
+            direct_match_score += 1
+
+    direct_score = min(direct_match_score / len(target_keywords) * 10, 10)  # 转换为0-10的分数，上限为10
 
     # 3.2 LDA主题关键词匹配
     lda_score = 0
@@ -200,7 +241,7 @@ def calculate_relevance_score(text, target_keywords=None):
         # 计算每个主题与目标关键词的匹配度
         topic_scores = []
         for topic_idx, keywords in topic_keywords.items():
-            matches = set(target_keywords).intersection(keywords)
+            matches = set(extended_target_keywords).intersection(keywords)
             topic_scores.append(len(matches) / len(target_keywords) * 10)
 
         # 取最高匹配度的主题分数
@@ -210,10 +251,17 @@ def calculate_relevance_score(text, target_keywords=None):
     # 3.3 计算最终分数 (直接匹配和LDA主题匹配的加权平均)
     final_score = 0.7 * direct_score + 0.3 * lda_score
 
+    # 如果文本明确多次提到"民营经济"或"民营企业"但分数仍然很低，进行调整
+    if "民营经济" in processed_text and "发展" in processed_text and final_score < 5:
+        print("检测到文本明确提及'民营经济'和'发展'，调整分数")
+        final_score = max(final_score, 5)  # 确保至少有中等相关度
+
     # 调试信息
     print(f"直接匹配分数: {direct_score}")
     print(f"LDA主题匹配分数: {lda_score}")
     print(f"关键词匹配项: {direct_matches}")
+    if len(content_based_matches) > 0:
+        print(f"内容直接匹配: {content_based_matches}")
 
     return round(final_score)
 
