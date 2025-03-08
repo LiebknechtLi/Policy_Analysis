@@ -17,7 +17,7 @@ from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentClo
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
 
-# 腾讯云API密钥 (注意: 实际应用中应存储在环境变量或配置文件中)
+# 腾讯云API密钥
 SECRET_ID = "your id"
 SECRET_KEY = "your key"
 
