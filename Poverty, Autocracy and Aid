@@ -1,0 +1,857 @@
+
+# For this analysis, we investigate: 
+# "Are countries with higher share of population in extreme poverty more likely to receive Chinese aid?"
+
+# Specifically, we will analyze how **share of population in extreme poverty**, measured as the 
+# **share.of.population.in.extreme.poverty** (constrained by data availability),
+# influences **Chinese aid distribution from 2019 to 2021**. 
+# 
+# To account for potential baseline differences in aid allocation, we will control 
+# for **Chinese aid received between 2013 and 2018**.
+
+# ---------------------------
+# Preliminaries
+# ---------------------------
+
+# Set working directory and load the necessary packages in R script.
+
+setwd("E:/R Materials") # <- Update this to your directory and comment it out after setting it!
+
+# Install necessary packages (uncomment if not installed)
+# install.packages("tidyverse")
+# install.packages("readxl")
+# install.packages("stargazer")
+# install.packages("ggplot2")
+# install.packages("patchwork")
+#install.packages("interactions")
+#install.packages("margins")
+# install.packages("estimatr")
+#install.packages("modelsummary")
+#install.packages("estimatr")
+
+# Load required libraries
+library(tidyverse)
+library(readxl)
+library(stargazer)
+library(ggplot2)
+library(patchwork)
+library(interactions)
+library(modelsummary)
+library(ggeffects)
+library(margins)
+library(lmtest)
+library(estimatr)
+
+# ---------------------------
+# Load Datasets
+# ---------------------------
+
+# Load the datasets into R
+aid_data <- read_excel("chinese-aid-data-2000-2021.xlsx")
+our_world_data <- read_excel("our-world-in-data-2013-2023.xlsx")
+
+#What uniquely identify the aid data? 
+sector_col <- "Sector Name" #relevant column
+id <- "AidData Record ID" #relevant column
+
+# Count total rows
+n_total <- nrow(aid_data)
+
+# Count unique rows by different key combinations
+n_entity <- n_distinct(aid_data$entity)
+n_entity_year <- n_distinct(aid_data %>% select(entity, year))
+n_entity_year_sector <- n_distinct(aid_data %>% select(entity, year, !!sym(sector_col)))
+
+# Compare counts
+cat("Total rows:", n_total, "\n")
+cat("Unique entities:", n_entity, "\n")
+cat("Unique entity-year combinations:", n_entity_year, "\n")
+cat("Unique entity-year-sector combinations:", n_entity_year_sector, "\n")
+
+#It is not just entity-year-sector.. there is more information!
+
+# ---------------------------
+# Transforming our_world_data into a Cross-Country Dataset
+# ---------------------------
+
+# The goal here is to create a **cross-country dataset** by aggregating 
+# country-year observations into country-level indicators.
+# We will compute **average values share of population in extreme poverty** 
+# (e.g., inequality, governance, democracy) **up to 2018**, ensuring that 
+# these predictors temporally precede the dependent variable (Chinese aid from 2019 onward).
+
+# Select relevant variables and filter data up to 2018
+variables_to_average <- c(
+  "ti-corruption-perception-index",  # Corruption perception index
+  "political-regime",  # Political regime classification
+  "share-of-population-in-extreme-poverty",  # Poverty rate
+  "economic-inequality-gini-index",  # Income inequality (Gini index)
+  "gdp-per-capita-worldbank",  # GDP per capita
+  "democracy-index-eiu"  # Democracy index
+)
+
+# Convert variables to numeric properly, replacing "." with NA
+our_world_data <- our_world_data %>%
+  mutate(across(all_of(variables_to_average), ~ as.numeric(na_if(as.character(.), "."))))
+
+# Filter data for years up to and including 2018
+our_world_data_filtered <- our_world_data %>%
+  filter(year <= 2018)
+
+# Compute the average of selected variables for each country, ensuring NA if all values are missing
+averaged_our_world_data <- our_world_data_filtered %>%
+  group_by(entity) %>%
+  summarise(across(all_of(variables_to_average), 
+                   ~ ifelse(all(is.na(.)), NA, mean(., na.rm = TRUE)), 
+                   .names = "{.col}_avg"), 
+            .groups = "drop")
+
+# Optionally, save the final dataset
+write.csv(averaged_our_world_data, "averaged_our_world_data.csv", row.names = FALSE)
+
+
+# ---------------------------
+# Processing Chinese Aid Data (2019-2021)
+# ---------------------------
+
+# The goal here is to compute:
+# 1. **Total aid received by each country (aid_all_sector)** – Averaged over 2019-2021.
+# 2. **Sector-specific aid received by each country** – Averaged over 2019-2021 for each sector.
+# 3. Convert all aid values to **million USD** for readability.
+# 4. Replace **NA values in sectoral aid with 0**, assuming no aid was given in that sector.
+# 5. **Round all values to two decimal places** for readability.
+
+# Load aid dataset
+aid_data <- read_excel("chinese-aid-data-2000-2021.xlsx")
+
+# Identify relevant columns
+aid_amount_col <- "Adjusted Amount (Constant USD 2021)"
+sector_col <- "Sector Name"
+
+# Filter data for years 2019-2021
+aid_data_filtered <- aid_data %>%
+  filter(year >= 2019 & year <= 2021)
+
+# ---------------------------
+# Compute Total Aid per Country (Averaged Over 2019-2021)
+# ---------------------------
+
+# Average aid amounts across entity-year (total aid received per country-year)
+aid_total <- aid_data_filtered %>%
+  group_by(entity) %>%
+  summarise(aid_all_sector = round(mean(!!sym(aid_amount_col), na.rm = TRUE) / 1e6, 2),  # Convert to million USD & round
+            .groups = "drop")
+
+# ---------------------------
+# Compute Sector-Specific Aid per Country (Averaged Over 2019-2021)
+# ---------------------------
+
+# Average aid amounts across entity-year-sector
+aid_by_sector <- aid_data_filtered %>%
+  group_by(entity, !!sym(sector_col)) %>%
+  summarise(sector_aid = round(mean(!!sym(aid_amount_col), na.rm = TRUE) / 1e6, 2),  # Convert to million USD & round
+            .groups = "drop")
+
+# Reshape data to have separate columns for each sector
+aid_avg_by_sector_pivot <- aid_by_sector %>%
+  pivot_wider(names_from = !!sym(sector_col), values_from = sector_aid, names_prefix = "aid_")
+
+# ---------------------------
+# Merge Total and Sector-Specific Aid Data
+# ---------------------------
+
+# Merge total aid and sector-wise aid into a single dataset
+aid_final <- aid_total %>%
+  left_join(aid_avg_by_sector_pivot, by = "entity")
+
+# ---------------------------
+# Handling Missing Sectoral Aid Values
+# ---------------------------
+
+# Assumption: If a country has NA in a sector, it means no aid was received in that sector for 2019-2021.
+# We replace NA with 0 to reflect this assumption.
+aid_final[is.na(aid_final)] <- 0
+
+# ---------------------------
+# Collapse Dataset to Cross-Country Format
+# ---------------------------
+
+# Ensure only relevant variables remain for the final dataset
+cross_country_aid <- aid_final
+
+# Optionally, save the final dataset
+write.csv(cross_country_aid, "cross_country_aid_2019_2021.csv", row.names = FALSE)
+
+
+# ---------------------------
+# Processing Baseline Chinese Aid Data (2013-2018)
+# ---------------------------
+
+# The goal here is to compute:
+# 1. **Baseline total aid received by each country (aid_all_sector_baseline)** – Averaged over 2013-2018.
+# 2. **Baseline sector-specific aid received by each country** – Averaged over 2013-2018 for each sector.
+# 3. Convert all aid values to **million USD** for readability.
+# 4. Replace **NA values in sectoral aid with 0**, assuming no aid was given in that sector.
+
+# Filter data for years 2013-2018
+aid_data_baseline <- aid_data %>%
+  filter(year >= 2013 & year <= 2018)
+
+# ---------------------------
+# Compute Baseline Total Aid per Country (Averaged Over 2013-2018)
+# ---------------------------
+
+# Average aid amounts across entity-year (total aid received per country-year)
+aid_total_baseline <- aid_data_baseline %>%
+  group_by(entity) %>%
+  summarise(aid_all_sector_baseline = round(mean(!!sym(aid_amount_col), na.rm = TRUE) / 1e6, 2),  # Convert to million USD & round
+            .groups = "drop")
+
+# ---------------------------
+# Compute Baseline Sector-Specific Aid per Country (Averaged Over 2013-2018)
+# ---------------------------
+
+# Average aid amounts across entity-year-sector
+aid_by_sector_baseline <- aid_data_baseline %>%
+  group_by(entity, !!sym(sector_col)) %>%
+  summarise(sector_aid_baseline = round(mean(!!sym(aid_amount_col), na.rm = TRUE) / 1e6, 2),  # Convert to million USD & round
+            .groups = "drop")
+
+# Reshape data to have separate columns for each sector
+aid_avg_by_sector_baseline_pivot <- aid_by_sector_baseline %>%
+  pivot_wider(names_from = !!sym(sector_col), values_from = sector_aid_baseline, names_prefix = "aid_baseline_")
+
+# ---------------------------
+# Merge Baseline Total and Sector-Specific Aid Data
+# ---------------------------
+
+# Merge total baseline aid and sector-wise baseline aid into a single dataset
+aid_baseline_final <- aid_total_baseline %>%
+  left_join(aid_avg_by_sector_baseline_pivot, by = "entity")
+
+# ---------------------------
+# Handling Missing Sectoral Aid Values
+# ---------------------------
+
+# Assumption: If a country has NA in a sector, it means no aid was received in that sector for 2013-2018.
+# We replace NA with 0 to reflect this assumption.
+aid_baseline_final[is.na(aid_baseline_final)] <- 0
+
+# ---------------------------
+# Collapse Dataset to Cross-Country Format
+# ---------------------------
+
+# Ensure only relevant variables remain for the final dataset
+cross_country_aid_baseline <- aid_baseline_final
+
+# View final dataset
+print(cross_country_aid_baseline)
+
+# Optionally, save the final dataset
+write.csv(cross_country_aid_baseline, "cross_country_aid_baseline_2013_2018.csv", row.names = FALSE)
+
+
+# ---------------------------
+# Merging All Datasets into a Single Cross-Country Dataset
+# ---------------------------
+
+# Load the datasets
+averaged_our_world_data <- read.csv("averaged_our_world_data.csv")
+cross_country_aid_2019_2021 <- read.csv("cross_country_aid_2019_2021.csv")
+cross_country_aid_baseline_2013_2018 <- read.csv("cross_country_aid_baseline_2013_2018.csv")
+
+# ---------------------------
+# Merge the datasets by 'entity' (country name)
+# ---------------------------
+
+cross_country_final <- averaged_our_world_data %>%
+  left_join(cross_country_aid_baseline_2013_2018, by = "entity") %>%
+  left_join(cross_country_aid_2019_2021, by = "entity")
+
+# ---------------------------
+# View and Save Final Merged Dataset
+# ---------------------------
+
+# Print dataset preview
+print(cross_country_final)
+
+# Save merged dataset to CSV
+write.csv(cross_country_final, "cross_country_final.csv", row.names = FALSE)
+
+
+# ---------------------------
+# Scatter Plot of Aid and Economic Inequality (Gini Index)
+# ---------------------------
+
+# Create scatter plot
+ggplot(cross_country_final, aes(x = share.of.population.in.extreme.poverty_avg, y = aid_all_sector)) +
+  geom_point(color = "blue", alpha = 0.6) +  # Scatter points
+  geom_smooth(method = "lm", se = TRUE, color = "red", linetype = "dashed") +  # Regression line
+  labs(
+    title = "Scatter Plot: Chinese Aid vs. Extreme Poverty",
+    x = "Share of Population in Extreme Poverty (Avg 2013-2018)",
+    y = "Total Chinese Aid (Million USD, 2019-2021)"
+  ) +
+  theme_minimal()
+
+
+# ---------------------------
+# Transform Outcome Variable: Log(1 + Aid)
+# ---------------------------
+
+# Apply log(1 + x) transformation to aid_all_sector
+cross_country_final <- cross_country_final %>%
+  mutate(log_aid_all_sector = log1p(aid_all_sector))  # log(1 + x) transformation
+
+# ---------------------------
+# Rerun Regression Analysis Using Log(1 + Aid)
+# ---------------------------
+
+# Model 1: Bivariate regression of log_aid_all_sector on corruption perception index
+m1_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg, 
+                           data = cross_country_final, se_type = "HC1")
+
+# Model 2: Add economic inequality (Gini index)
+m2_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                             economic.inequality.gini.index_avg, 
+                           data = cross_country_final, se_type = "HC1")
+
+# Model 3: Add political regime
+m3_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg, 
+                           data = cross_country_final, se_type = "HC1")
+
+# Model 4: Add share of population in extreme poverty
+m4_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg, 
+                           data = cross_country_final, se_type = "HC1")
+
+# Model 5: Add GDP per capita
+m5_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg + 
+                             gdp.per.capita.worldbank_avg, 
+                           data = cross_country_final, se_type = "HC1")
+
+# Model 6: Add democracy index
+m6_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg + 
+                             gdp.per.capita.worldbank_avg + 
+                             democracy.index.eiu_avg, 
+                           data = cross_country_final, se_type = "HC1")
+
+# Model 7: Add baseline aid (2013-2018)
+m7_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg + 
+                             gdp.per.capita.worldbank_avg + 
+                             democracy.index.eiu_avg + 
+                             aid_all_sector_baseline, 
+                           data = cross_country_final, se_type = "HC1")
+
+
+# ---------------------------
+# Save Regression Results Using modelsummary
+# ---------------------------
+
+# Define the list of models
+models <- list(
+  "M1" = m1_all_sector,
+  "M2" = m2_all_sector,
+  "M3" = m3_all_sector,
+  "M4" = m4_all_sector,
+  "M5" = m5_all_sector,
+  "M6" = m6_all_sector,
+  "M7" = m7_all_sector
+)
+
+
+# Save as HTML with robust standard errors
+modelsummary(model = models, 
+             stars = TRUE, 
+             statistic = "std.error",  # Displays robust SEs
+             coef_map = c(
+               "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+               "economic.inequality.gini.index_avg" = "Gini Index",
+               "political.regime_avg" = "Political Regime",
+               "ti.corruption.perception.index_avg" = "Corruption Index", 
+               "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+               "democracy.index.eiu_avg" = "Democracy Index",
+               "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+               "(Intercept)" = "Constant"
+             ),
+             output = "regression_results_log_aid.html")
+
+# Save as LaTeX with robust standard errors
+modelsummary(model = models, 
+             stars = TRUE, 
+             statistic = "std.error",  # Displays robust SEs
+             coef_map = c(
+               "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+               "economic.inequality.gini.index_avg" = "Gini Index",
+               "political.regime_avg" = "Political Regime",
+               "ti.corruption.perception.index_avg" = "Corruption Index", 
+               "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+               "democracy.index.eiu_avg" = "Democracy Index",
+               "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+               "(Intercept)" = "Constant"
+             ),
+             output = "regression_results_log_aid.tex")
+
+# Print the final model (optional)
+print(m7_all_sector)
+
+# Combine all three models into one regression table and save as a single text file
+summary(m7_all_sector)
+
+# ---------------------------
+# Create New Variable: Autocratic Indicator
+# ---------------------------
+
+cross_country_final <- cross_country_final %>%
+  mutate(autocratic_regime = ifelse(political.regime_avg <= 1, 1, 0))
+
+# ---------------------------
+# Regression Analysis with Interaction Term
+# ---------------------------
+
+# Model 1: Bivariate regression with interaction term
+m1_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime, 
+                            data = cross_country_final, se_type = "HC1")
+
+# Model 2: Add economic inequality
+m2_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime + 
+                              economic.inequality.gini.index_avg, 
+                            data = cross_country_final, se_type = "HC1")
+
+# Model 3: Add political regime (already captured by autocratic_regime, but for consistency with previous models)
+m3_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime + 
+                              economic.inequality.gini.index_avg+ 
+                              political.regime_avg, 
+                            data = cross_country_final, se_type = "HC1")
+
+# Model 4: Add share of population in extreme poverty
+m4_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime + 
+                              economic.inequality.gini.index_avg + 
+                              political.regime_avg + 
+                             ti.corruption.perception.index_avg, 
+                            data = cross_country_final, se_type = "HC1")
+
+# Model 5: Add GDP per capita
+m5_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime + 
+                             economic.inequality.gini.index_avg +  
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg + 
+                              gdp.per.capita.worldbank_avg, 
+                            data = cross_country_final, se_type = "HC1")
+
+# Model 6: Add democracy index
+m6_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg + 
+                              gdp.per.capita.worldbank_avg + 
+                              democracy.index.eiu_avg, 
+                            data = cross_country_final, se_type = "HC1")
+
+# Model 7: Add baseline aid (2013-2018)
+m7_all_sector <- lm_robust(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg * autocratic_regime + 
+                             economic.inequality.gini.index_avg + 
+                             political.regime_avg + 
+                             ti.corruption.perception.index_avg + 
+                              gdp.per.capita.worldbank_avg + 
+                              democracy.index.eiu_avg + 
+                              aid_all_sector_baseline, 
+                            data = cross_country_final, se_type = "HC1")
+
+# ---------------------------
+# Save Regression Results Using modelsummary
+# ---------------------------
+
+# Define the list of models
+models <- list(
+  "M1 (Bivariate + Interaction)" = m1_all_sector,
+  "M2 (+ Economic Inequality)" = m2_all_sector,
+  "M3 (+ Political Regime)" = m3_all_sector,
+  "M4 (+ Corruption Index)" = m4_all_sector,
+  "M5 (+ GDP per Capita)" = m5_all_sector,
+  "M6 (+ Democracy Index)" = m6_all_sector,
+  "M7 (+ Baseline Aid)" = m7_all_sector
+)
+
+
+# Create a more standardized results table
+table_result = modelsummary(
+  models = models,
+  stars = TRUE,
+  statistic = "std.error",  # Display robust standard errors
+  output = "html",
+  coef_map = c(
+    "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+    "autocratic_regime" = "Autocratic Regime",
+    "share.of.population.in.extreme.poverty_avg:autocratic_regime" = "Extreme Poverty × Autocratic Regime",
+    "economic.inequality.gini.index_avg" = "Gini Index",
+    "political.regime_avg" = "Political Regime",
+    "ti.corruption.perception.index_avg" = "Corruption Index", 
+    "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+    "democracy.index.eiu_avg" = "Democracy Index",
+    "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+    "(Intercept)" = "Constant"
+  ),
+  title = "Determinants of Chinese Foreign Aid (2019-2021)",
+  notes = "Note: * p<0.1, ** p<0.05, *** p<0.01. All models use HC2 robust standard errors."
+)
+
+# Save the results table as an HTML file
+writeLines(as.character(table_result),
+           "china_aid_regression_results.html")
+
+# Also retain LaTeX output (if needed)
+modelsummary(model = models, 
+             stars = TRUE, 
+             statistic = "std.error",
+             coef_map = c(
+               "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+               "economic.inequality.gini.index_avg" = "Gini Index",
+               "political.regime_avg" = "Political Regime",
+               "share.of.population.in.extreme.poverty_avg:autocratic_regime" = "Extreme Poverty × Autocratic Regime",
+               "ti.corruption.perception.index_avg" = "Corruption Index", 
+               "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+               "democracy.index.eiu_avg" = "Democracy Index",
+               "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+               "(Intercept)" = "Constant"
+             ),
+             title = "Determinants of Chinese Foreign Aid (2019-2021)",
+             notes = "Note: * p<0.1, ** p<0.05, *** p<0.01. All models use HC2 robust standard errors.",
+             output = "regression_results_log_aid.tex")
+
+# Print the final model (optional)
+print(m7_all_sector)
+
+# ---------------------------
+# Why Analyze Subsector Aid?
+# ---------------------------
+# Since our initial regression on total aid (`aid_all_sector`) showed no clear effects,
+# we now examine aid distribution at a more granular level (by subsector).
+# This allows us to:
+# - Identify whether specific aid categories are more influenced by economic inequality.
+# - Account for heterogeneity in Chinese aid distribution patterns.
+# - Control for past aid in each subsector to isolate the effects.
+
+# ---------------------------
+# Define List of Aid Subsectors
+# ---------------------------
+
+# List of subsector aid variables and their corresponding baselines
+subsectors <- c(
+  "DEVELOPMENTAL.FOOD.AID.FOOD.SECURITY.ASSISTANCE",
+  "DISASTER.PREVENTION.AND.PREPAREDNESS",
+  "EMERGENCY.RESPONSE",
+  "GOVERNMENT.AND.CIVIL.SOCIETY",
+  "HEALTH",
+  "OTHER.SOCIAL.INFRASTRUCTURE.AND.SERVICES",
+  "EDUCATION",
+  "AGRICULTURE..FORESTRY..FISHING",
+  "UNALLOCATED.UNSPECIFIED",
+  "ACTION.RELATING.TO.DEBT",
+  "ENERGY",
+  "POPULATION.POLICIES.PROGRAMMES.AND.REPRODUCTIVE.HEALTH",
+  "WATER.SUPPLY.AND.SANITATION",
+  "TRADE.POLICIES.AND.REGULATIONS",
+  "BANKING.AND.FINANCIAL.SERVICES",
+  "BUSINESS.AND.OTHER.SERVICES",
+  "COMMUNICATIONS",
+  "INDUSTRY..MINING..CONSTRUCTION",
+  "OTHER.MULTISECTOR",
+  "TRANSPORT.AND.STORAGE",
+  "GENERAL.ENVIRONMENTAL.PROTECTION",
+  "OTHER.COMMODITY.ASSISTANCE",
+  "RECONSTRUCTION.RELIEF.AND.REHABILITATION",
+  "GENERAL.BUDGET.SUPPORT"
+)
+
+# ---------------------------
+# Loop Through Each Subsector, Transform & Regress
+# ---------------------------
+
+for (subsector in subsectors) {
+  
+  # Define the variable names dynamically
+  aid_var <- paste0("aid_", subsector)
+  baseline_var <- paste0("aid_baseline_", subsector)
+  log_aid_var <- paste0("log_", aid_var)
+  
+  # Apply log(1 + x) transformation
+  cross_country_final <- cross_country_final %>%
+    mutate(!!log_aid_var := log1p(!!sym(aid_var)))
+  
+  # ---------------------------
+  # Run Progressive Regressions
+  # ---------------------------
+  
+  # Model 1: Bivariate regression with extreme poverty
+  m1 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg, 
+                  data = cross_country_final, se_type = "HC1")
+  
+  # Model 2: Add economic inequality (Gini index)
+  m2 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg, 
+                  data = cross_country_final, se_type = "HC1")
+  
+  # Model 3: Add political regime
+  m3 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg + 
+                    political.regime_avg, 
+                  data = cross_country_final, se_type = "HC1")
+  
+  # Model 4: Add corruption perception index
+  m4 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg + 
+                    political.regime_avg + 
+                    ti.corruption.perception.index_avg, 
+                  data = cross_country_final, se_type = "HC1")
+  
+  # Model 5: Add GDP per capita
+  m5 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg + 
+                    political.regime_avg + 
+                    ti.corruption.perception.index_avg + 
+                    gdp.per.capita.worldbank_avg, 
+                  data = cross_country_final, se_type = "HC1")
+  
+  # Model 6: Add democracy index
+  m6 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg + 
+                    political.regime_avg + 
+                    ti.corruption.perception.index_avg + 
+                    gdp.per.capita.worldbank_avg + 
+                    democracy.index.eiu_avg, 
+                  data = cross_country_final, se_type = "HC1")
+  
+  # Model 7: Add baseline aid for the same subsector
+  m7 <- lm_robust(!!sym(log_aid_var) ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg + 
+                    political.regime_avg + 
+                    ti.corruption.perception.index_avg + 
+                    gdp.per.capita.worldbank_avg + 
+                    democracy.index.eiu_avg + 
+                    !!sym(baseline_var),
+                  data = cross_country_final, se_type = "HC1")
+  
+  # ---------------------------
+  # Save Regression Results (One Table Per Sector)
+  # ---------------------------
+  
+  # List of models for this subsector
+  models <- list(
+    "M1" = m1,
+    "M2" = m2,
+    "M3" = m3,
+    "M4" = m4,
+    "M5" = m5,
+    "M6" = m6,
+    "M7" = m7
+  )
+  
+  # Generate filenames dynamically
+  html_file <- paste0("regression_results_", subsector, ".html")
+  tex_file <- paste0("regression_results_", subsector, ".tex")
+  
+  # Save as HTML
+  modelsummary(models, 
+               stars = TRUE, 
+               statistic = "std.error",  # Displays robust SEs
+               coef_map = c(
+                 "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+                 "economic.inequality.gini.index_avg" = "Gini Index",
+                 "political.regime_avg" = "Political Regime",
+                 "ti.corruption.perception.index_avg" = "Corruption Index", 
+                 "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+                 "democracy.index.eiu_avg" = "Democracy Index",
+                 "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+                 "(Intercept)" = "Constant"
+               ),
+               output = html_file)
+  
+  # Save as LaTeX
+  modelsummary(models, 
+               stars = TRUE, 
+               statistic = "std.error",  # Displays robust SEs
+               coef_map = c(
+                 "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+                 "economic.inequality.gini.index_avg" = "Gini Index",
+                 "political.regime_avg" = "Political Regime",
+                 "ti.corruption.perception.index_avg" = "Corruption Index", 
+                 "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+                 "democracy.index.eiu_avg" = "Democracy Index",
+                 "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+                 "(Intercept)" = "Constant"
+               ),
+               output = tex_file)
+  
+  # Print message to track progress
+  print(paste("Regression results saved for:", subsector))
+}
+
+# Verifying Gauss-Markov Assumptions in the Regression Model
+
+standard_m7 <- lm(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                    economic.inequality.gini.index_avg + 
+                    political.regime_avg + 
+                    ti.corruption.perception.index_avg + 
+                    gdp.per.capita.worldbank_avg + 
+                    democracy.index.eiu_avg + 
+                    aid_all_sector_baseline, 
+                  data = cross_country_final)
+
+
+# 1. Linearity: Check Residual vs. Fitted Plot
+plot(standard_m7, which=1)
+
+# 2. Random Sampling: Checking for Sample Bias
+#summary(cross_country_final)
+hist(log(cross_country_final$share.of.population.in.extreme.poverty_avg), main = "Distribution of Log Extreme Poverty", xlab = "Extreme Poverty")
+hist(cross_country_final$log_aid_all_sector, main = "Distribution of Log Aid", xlab = "Log Aid")
+
+
+# Interpretation:
+# - If the data is highly skewed or contains extreme outliers, it may indicate sampling bias.
+
+# 3. No Perfect Multicollinearity: Variance Inflation Factor (VIF)
+library(car)
+vif_values <- vif(standard_m7)
+print(vif_values)
+
+# Interpretation:
+# - If VIF > 5, it indicates potential multicollinearity.
+# - If VIF > 10, severe multicollinearity exists.
+
+# 4. Zero Conditional Mean of Errors: Durbin-Watson Test for Autocorrelation
+library(lmtest)
+dw_test <- dwtest(standard_m7)
+print(dw_test)
+
+# Interpretation:
+# - If p-value is small (<0.05), then there is autocorrelation, violating the zero conditional mean assumption.
+# - If p-value is large, there is no strong evidence of autocorrelation.
+
+# 5. Homoscedasticity: Breusch-Pagan Test
+bp_test <- bptest(standard_m7)
+print(bp_test)
+
+# Interpretation:
+# - A small p-value (<0.05) suggests heteroscedasticity, meaning variance is not constant.
+
+# 6. Normality of Residuals: Histogram and Q-Q Plot
+hist(residuals(standard_m7), breaks = 20, main = "Histogram of Residuals", xlab = "Residuals")
+qqnorm(residuals(standard_m7))
+qqline(residuals(standard_m7))
+
+# Conclusion:
+# - The results of these tests help determine whether the Gauss-Markov assumptions hold.
+# - If violations are detected, consider transformations, heteroskedasticity-robust standard errors, or variable selection.
+
+# ---------------------------
+# Outlier Analysis and Threats to Validity
+# ---------------------------
+
+final_model <- standard_m7
+
+n <- nrow(cross_country_final)
+k <- length(coef(final_model)) - 1
+
+# Get model summary stats
+h <- hatvalues(final_model)  # Leverage
+stud_res <- rstudent(final_model)  # Studentized residuals
+cook_d <- cooks.distance(final_model)  # Cook's distance
+dffits_val <- dffits(final_model)  # DFFITS
+
+# Check and remove NA values
+complete_cases <- complete.cases(data.frame(h, stud_res, cook_d, dffits_val))
+h <- h[complete_cases]
+stud_res <- stud_res[complete_cases]
+cook_d <- cook_d[complete_cases]
+dffits_val <- dffits_val[complete_cases]
+
+# Create observation indices to match filtered data
+observation_indices <- which(complete_cases)
+
+# Create a dataframe to store outlier diagnostics
+outlier_df <- data.frame(
+  observation = observation_indices,
+  leverage = h,
+  stud_residuals = stud_res,
+  cooks_d = cook_d,
+  dffits = dffits_val
+)
+
+# Define Critical Thresholds for Outliers
+adjusted_n <- length(observation_indices)
+leverage_threshold <- (2 * k + 4) / adjusted_n
+cooks_threshold <- 4 / adjusted_n
+dffits_threshold <- 2 * sqrt(k / adjusted_n)
+
+# Identify Outliers Based on Thresholds
+outlier_df$leverage_outlier <- outlier_df$leverage > leverage_threshold
+outlier_df$resid_outlier <- abs(outlier_df$stud_residuals) > 2
+outlier_df$cooks_outlier <- outlier_df$cooks_d > cooks_threshold
+outlier_df$dffits_outlier <- abs(outlier_df$dffits) > dffits_threshold
+
+# Identify as outlier if exceeds any threshold
+outlier_df$is_outlier <- outlier_df$leverage_outlier | outlier_df$resid_outlier | 
+  outlier_df$cooks_outlier | outlier_df$dffits_outlier
+
+summary(outlier_df$is_outlier)
+
+# Identify as egregious outlier if exceeds all thresholds
+outlier_df$is_egregious <- outlier_df$leverage_outlier & outlier_df$resid_outlier & 
+  outlier_df$cooks_outlier & outlier_df$dffits_outlier
+
+summary(outlier_df$is_egregious)
+
+# Filter out identified outliers
+outlier_indices <- outlier_df$observation[outlier_df$is_outlier]
+
+
+# Create a new dataset excluding outliers
+clean_data <- cross_country_final[-outlier_indices, ]
+
+cleaned_model <- lm(log_aid_all_sector ~ share.of.population.in.extreme.poverty_avg + 
+                      economic.inequality.gini.index_avg + 
+                      political.regime_avg + 
+                      ti.corruption.perception.index_avg + 
+                      gdp.per.capita.worldbank_avg + 
+                      democracy.index.eiu_avg + 
+                      aid_all_sector_baseline,
+                      data = clean_data
+                    )
+
+cleaned_models = list("M7" = cleaned_model)
+
+
+modelsummary(model = cleaned_models, 
+             stars = TRUE, 
+             statistic = "std.error",  # Displays robust SEs
+             coef_map = c(
+               "share.of.population.in.extreme.poverty_avg" = "Extreme Poverty Rate",
+               "economic.inequality.gini.index_avg" = "Gini Index",
+               "political.regime_avg" = "Political Regime",
+               "ti.corruption.perception.index_avg" = "Corruption Index", 
+               "gdp.per.capita.worldbank_avg" = "GDP per Capita",
+               "democracy.index.eiu_avg" = "Democracy Index",
+               "aid_all_sector_baseline" = "Baseline Aid (2013-2018)",
+               "(Intercept)" = "Constant"
+             ),
+             output = "Regression Models With and Without Outliers.html")
+
+
+
+
+
