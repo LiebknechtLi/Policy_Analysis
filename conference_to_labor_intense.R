@@ -83,32 +83,14 @@ model_lag_3 <- lm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 + RnD_In
 model_lag_4 <- lm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 + RnD_Institutions_Lag1 + 
                     Tech_Expenditure_Proportion_Lag1 + Patents_Granted_Lag1, data = reg_data_lag)
 
-# 输出模型摘要
-cat("\n模型1摘要 (只有会议主题建模指数):\n")
-print(summary(model_lag_1))
-
-cat("\n模型2摘要 (添加R&D机构数):\n")
-print(summary(model_lag_2))
-
-cat("\n模型3摘要 (添加科技支出占比):\n")
-print(summary(model_lag_3))
-
-cat("\n模型4摘要 (添加专利授予数量):\n")
-print(summary(model_lag_4))
-
 # 创建交互项模型
 model_lag_interaction <- lm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 * RnD_Institutions_Lag1 + 
                               Tech_Expenditure_Proportion_Lag1 + Patents_Granted_Lag1, data = reg_data_lag)
-
-cat("\n交互项模型摘要:\n")
-print(summary(model_lag_interaction))
 
 # 创建带年份固定效应的模型
 model_lag_year_fe <- lm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 + RnD_Institutions_Lag1 + 
                           Tech_Expenditure_Proportion_Lag1 + Patents_Granted_Lag1 + Year_Factor, data = reg_data_lag)
 
-cat("\n带年份固定效应的模型摘要:\n")
-print(summary(model_lag_year_fe))
 
 # 创建系数汇总表格
 results_table <- data.frame(
@@ -120,9 +102,19 @@ results_table <- data.frame(
   Model4 = c(coef(model_lag_4)[1], coef(model_lag_4)[2], coef(model_lag_4)[3], coef(model_lag_4)[4], coef(model_lag_4)[5])
 )
 
-# 输出系数汇总表格
-cat("\n系数汇总表格:\n")
-print(results_table)
+models <- list(
+  "M1"= model_lag_1,
+  "M2"= model_lag_2,
+  "M3"= model_lag_3,
+  "M4"= model_lag_4,
+  "M5"= model_lag_interaction,
+  "M6"= model_lag_year_fe
+)
+
+modelsummary(models, 
+             stars = TRUE, 
+             statistic = "std.error",  # Displays robust SEs
+             output = "regression_of_labor.html")
 
 
 # 1. 使用稳健标准误
@@ -135,23 +127,49 @@ cat("\n2. 使用稳健回归 (M估计):\n")
 robust_model <- rlm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 + RnD_Institutions_Lag1 + 
                       Tech_Expenditure_Proportion_Lag1 + Patents_Granted_Lag1, 
                     data = reg_data_lag, method = "M")
-print(summary(robust_model))
 
-# 3. 使用加权最小二乘法 (WLS)
-# 使用残差绝对值的倒数作为权重
-residuals_abs <- abs(residuals(model_lag_4))
-weights <- 1/residuals_abs
-# 替换无穷大权重（如果有）
-weights[is.infinite(weights)] <- max(weights[is.finite(weights)])
-# 拟合WLS模型
-cat("\n3. 使用加权最小二乘法 (WLS):\n")
-wls_model <- lm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 + RnD_Institutions_Lag1 + 
-                  Tech_Expenditure_Proportion_Lag1 + Patents_Granted_Lag1, 
-                data = reg_data_lag, weights = weights)
-print(summary(wls_model))
+robust_model2 <-  rlm(FTE_Personnel_Increment ~ Conference_Topic_Index_Lag1 * RnD_Institutions_Lag1 + 
+                        Tech_Expenditure_Proportion_Lag1 + Patents_Granted_Lag1 , 
+                      data = reg_data_lag, method = "M")
 
-# 4. 检查多重共线性
-cat("\n4. 多重共线性检验 (VIF):\n")
+
+
+
+models2 <- list(
+  "M1"= model_lag_1,
+  "M2"= model_lag_2,
+  "M3"= model_lag_3,
+  "M4"= model_lag_4,
+  "M5"= model_lag_interaction,
+  "M6"= robust_model,
+  "M7"= robust_model2
+)
+
+
+modelsummary(models2,
+             stars = TRUE, 
+             statistic = "std.error",  # Displays robust SEs
+             output = "Robust Regression Models.html"
+  
+  
+)
+
+plot(model_lag_4, which=1)
+
+hist(reg_data_eng$Tech_Expenditure_Proportion, main = "Distribution of Tech Expenditure", xlab = "Tech Expenditure")
+
+
 vif_result <- vif(model_lag_4)
 print(vif_result)
-cat("VIF > 10 通常表示存在严重的多重共线性问题。\n")
+
+
+library(lmtest)
+dw_test <- dwtest(model_lag_4)
+print(dw_test)
+
+bp_test <- bptest(model_lag_4)
+print(bp_test)
+
+hist(residuals(model_lag_4), breaks = 5, main = "Histogram of Residuals", xlab = "Residuals")
+
+
