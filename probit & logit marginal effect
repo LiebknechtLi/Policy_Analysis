@@ -1,0 +1,439 @@
+
+# Setup
+setwd("E:/R Materials")
+
+required_packages <- c("tidyverse", "fixest", "mfx", "margins", "stargazer", "broom", "caret")
+installed_packages <- rownames(installed.packages())
+for (pkg in required_packages) {
+  if (!(pkg %in% installed_packages)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+
+# Load data
+load("E:/R Materials/loanapplications.Rda")
+
+# Question 1: Continuous Dependent Variable (loanamt) 
+install.packages("modelsummary")
+
+library(modelsummary)
+
+# 1a: Regional variables
+model_1a <- feols(loanamt ~ mi + vr + min30, data = loanapplications)
+print(model_1a)
+
+
+# 1b: Individual-level variables
+model_1b <- feols(loanamt ~ married + dep + emp, data = loanapplications)
+print(model_1b)
+
+
+# 1c: Combined model and joint test
+model_1c <- feols(loanamt ~ mi + vr + min30 + married + dep + emp, data = loanapplications)
+test_region <- wald(model_1c, keep = c("mi", "vr", "min30"))
+
+test_individual<- wald(model_1c, keep = c("married", "dep", "emp"))
+print(model_1c)
+
+print(test_region)
+
+print(test_individual)
+
+
+# 1d: Marriage x Gender interaction
+model_1d <- feols(netw ~ married * male, data = loanapplications)
+print(model_1d)
+
+# --- Graphs for Q1 ---
+# GRAPH 1: Boxplot of loan amount by regional indicators
+loanapplications %>%
+  filter(!is.na(loanamt)) %>%
+  mutate(loanamt_log = log1p(loanamt)) %>%
+  pivot_longer(cols = c(mi, vr, min30), names_to = "region_var", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  ggplot(aes(x = factor(value, labels = c("No", "Yes")), y = loanamt_log)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.6, outlier.alpha = 0.3) +
+  facet_wrap(~region_var, labeller = label_both) +
+  labs(
+    x = "Regional Indicator",
+    y = "Log(Loan Amount + 1)",
+    title = "Distribution of Loan Amounts by Regional Characteristics"
+  ) +
+  theme_minimal(base_size = 12)
+
+
+# GRAPH 2: Smooth plot of loan amount vs years in industry
+p1 <- loanapplications %>%
+  filter(!is.na(emp), !is.na(loanamt), !is.na(married)) %>%
+  ggplot(aes(x = emp, y = loanamt)) +
+  
+  geom_jitter(aes(color = factor(married)), alpha = 0.3, width = 0.3) +
+
+  stat_summary(fun = mean, geom = "line", color = "red", size = 1.1) +
+
+  scale_y_continuous(trans = "log1p", labels = scales::dollar_format()) +
+
+  labs(
+    x = "Years of Employment",
+    y = "Loan Amount (log scale)",
+    color = "Married",
+    title = "Loan Amount by Years in Industry (Colored by Marital Status)"
+  ) +
+
+  theme_minimal(base_size = 13)
+
+print(p1)
+
+
+# --- Question 2: Binary Dependent Variable (approve) ---
+
+model_2a_1 <- lm(approve ~ hexp + unit, data = loanapplications)
+model_2a_2 <- lm(approve ~ hexp + unit + price, data = loanapplications)
+
+modelsummary(
+  list(
+    "Without Price" = model_2a_1,
+    "With Price" = model_2a_2
+  ),
+  title = "Model 2a: Effect of Housing Expenses on Loan Approval",
+  coef_map = c(
+    "hexp" = "Housing Expense",
+    "unit" = "Number of Units",
+    "price" = "House Price"
+  ),
+  output = "markdown"  
+)
+
+
+model_lpm <- feols(approve ~ hexp + unit + price, data = loanapplications, vcov = "HC1")
+model_probit <- feglm(approve ~ hexp + unit + price, data = loanapplications, family = binomial("probit"), vcov = "HC1")
+model_logit <- feglm(approve ~ hexp + unit + price, data = loanapplications, family = binomial("logit"), vcov = "HC1")
+
+
+model_2c <- feglm(approve ~ hexp + unit + price + pubrec, data = loanapplications, family = binomial("logit"), vcov = "HC1")
+print(model_2c)
+
+
+# 2d: Marginal effects
+logit_mfx <- logitmfx(approve ~ hexp + unit + price + pubrec, data = loanapplications, robust = TRUE)
+probit_mfx <- probitmfx(approve ~ hexp + unit + price + pubrec, data = loanapplications, robust = TRUE)
+lpm_model <- feols(approve ~ hexp + unit + price + pubrec, data = loanapplications, vcov = "HC1")
+
+
+library(broom)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+
+lpm_effects_df <- tidy(lpm_model) %>%
+  filter(term %in% c("hexp", "unit", "price", "pubrec")) %>%
+  mutate(term = recode(term,
+                       "hexp" = "Housing Expense",
+                       "unit" = "Number of Units",
+                       "price" = "House Price",
+                       "pubrec" = "Prior Bankruptcy"))
+
+
+logit_effects <- logit_mfx$mfxest
+probit_effects <- probit_mfx$mfxest
+
+
+mfx_table <- data.frame(
+  Variable = lpm_effects_df$term,
+  LPM = sprintf("%.3f (%.3f)",
+                lpm_effects_df$estimate,
+                lpm_effects_df$std.error),
+  Logit = sprintf("%.3f (%.3f)",
+                  logit_effects[c("hexp", "unit", "price", "pubrec"), "dF/dx"],
+                  logit_effects[c("hexp", "unit", "price", "pubrec"), "Std. Err."]),
+  Probit = sprintf("%.3f (%.3f)",
+                   probit_effects[c("hexp", "unit", "price", "pubrec"), "dF/dx"],
+                   probit_effects[c("hexp", "unit", "price", "pubrec"), "Std. Err."])
+)
+
+
+library(knitr)
+library(kableExtra)
+
+kbl(mfx_table,
+    caption = "Table 2D: Marginal Effects from LPM, Logit, and Probit Models on Loan Approval",
+    align = "c") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed")) %>%
+  add_header_above(c(" " = 1, "LPM" = 1, "Logit (Marginal Effect)" = 1, "Probit (Marginal Effect)" = 1)) %>%
+  footnote(general = "Standard errors in parentheses. All estimates are average marginal effects. Dependent variable: 1 = approved, 0 = denied.")
+
+
+
+# 2e: Interaction effect of bankruptcy and income
+loanapplications <- loanapplications %>%
+  mutate(highinc = if_else(appinc > median(appinc[appinc < 666], na.rm = TRUE), 1, 0))
+
+model_2e <- feglm(approve ~ pubrec * highinc + hexp + unit + price,
+                  data = loanapplications,
+                  family = binomial("logit"))
+
+modelsummary(
+  model_2e,
+  title = "Model 2e: Interaction Between Bankruptcy and High Income on Loan Approval",
+  coef_map = c(
+    "pubrec" = "Prior Bankruptcy",
+    "highinc" = "High Income",
+    "pubrec:highinc" = "Bankruptcy × High Income",
+    "hexp" = "Housing Expense",
+    "unit" = "Number of Units",
+    "price" = "House Price"
+  ),
+  gof_omit = "AIC|BIC|Log.Lik",
+  estimate = "{estimate} ({std.error})",
+  statistic = NULL,
+  output = "markdown"  
+)
+
+
+# 2f: Additional variables (credit quality)
+model_2f <- feglm(approve ~ pubrec + hexp + unit + price + thick + mortperf,
+                  data = loanapplications,
+                  family = binomial("logit"))
+
+
+modelsummary(
+  model_2f,
+  title = "Model 2f: Effect of Credit History and Performance on Loan Approval",
+  coef_map = c(
+    "pubrec" = "Prior Bankruptcy",
+    "hexp" = "Housing Expense",
+    "unit" = "Number of Units",
+    "price" = "House Price",
+    "thick" = "Number of Credit Lines",
+    "mortperf" = "Mortgage Performance"
+  ),
+  gof_omit = "AIC|BIC|Log.Lik",
+  estimate = "{estimate} ({std.error})",
+  statistic = NULL,
+  output = "markdown"  
+)
+
+
+# --- Graphs for Q2 ---
+# GRAPH 3: Predicted probabilities from LPM, Probit, Logit
+loanapplications <- loanapplications %>%
+  mutate(
+    yhat_lpm    = predict(model_lpm,    newdata = loanapplications),
+    yhat_probit = predict(model_probit, newdata = loanapplications),
+    yhat_logit  = predict(model_logit,  newdata = loanapplications)
+  )
+
+
+plot_df <- loanapplications %>%
+  filter(!is.na(hexp), !is.na(yhat_lpm), !is.na(yhat_probit), !is.na(yhat_logit)) %>%
+  mutate(hexp_bin = cut(hexp, breaks = 50)) %>%
+  group_by(hexp_bin) %>%
+  summarize(
+    hexp = mean(hexp, na.rm = TRUE),
+    yhat_lpm = mean(yhat_lpm, na.rm = TRUE),
+    yhat_probit = mean(yhat_probit, na.rm = TRUE),
+    yhat_logit = mean(yhat_logit, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  drop_na()  
+
+
+library(tidyr)
+
+plot_long <- plot_df %>%
+  pivot_longer(cols = starts_with("yhat"), names_to = "model", values_to = "prediction") %>%
+  mutate(model = recode(model,
+                        yhat_lpm = "LPM",
+                        yhat_probit = "Probit",
+                        yhat_logit = "Logit"))
+
+
+p2 <- ggplot(plot_long, aes(x = hexp, y = prediction, color = model, linetype = model)) +
+  geom_line(size = 1.1) +
+  labs(
+    x = "Housing Expense",
+    y = "Predicted Approval Probability",
+    title = "Model Comparison: Predicted Loan Approval by Housing Expense",
+    color = "Model",
+    linetype = "Model"
+  ) +
+  scale_y_continuous(limits = c(0.4, 1.05)) +  
+  theme_minimal(base_size = 13)
+
+print(p2)
+
+
+df_model <- loanapplications %>%
+  filter(!is.na(hexp), !is.na(unit), !is.na(price), !is.na(pubrec), !is.na(approve))
+
+
+df_model <- df_model %>%
+  mutate(
+    pred_2c = as.integer(predict(model_2c, type = "response", newdata = df_model) > 0.5),
+    pred_2f = as.integer(predict(model_2f, type = "response", newdata = df_model) > 0.5)
+  )
+
+
+actual   <- factor(df_model$approve, levels = c(0, 1))
+pred_2c  <- factor(df_model$pred_2c, levels = c(0, 1))
+pred_2f  <- factor(df_model$pred_2f, levels = c(0, 1))
+
+cm_2c <- caret::confusionMatrix(pred_2c, actual, positive = "1")
+cm_2f <- caret::confusionMatrix(pred_2f, actual, positive = "1")
+
+
+metrics_2c <- cm_2c$byClass
+metrics_2f <- cm_2f$byClass
+
+
+acc_2c <- cm_2c$overall["Accuracy"]
+acc_2f <- cm_2f$overall["Accuracy"]
+
+
+comparison_df <- data.frame(
+  Metric = c("Accuracy", "Sensitivity (Recall)", "Specificity", "Precision (PPV)", "F1 Score"),
+  `Model 2c` = c(
+    round(acc_2c, 3),
+    round(metrics_2c["Sensitivity"], 3),
+    round(metrics_2c["Specificity"], 3),
+    round(metrics_2c["Pos Pred Value"], 3),
+    round(metrics_2c["F1"], 3)
+  ),
+  `Model 2f` = c(
+    round(acc_2f, 3),
+    round(metrics_2f["Sensitivity"], 3),
+    round(metrics_2f["Specificity"], 3),
+    round(metrics_2f["Pos Pred Value"], 3),
+    round(metrics_2f["F1"], 3)
+  )
+)
+
+
+library(kableExtra)
+
+
+kbl(comparison_df,
+    caption = "Comparison of Predictive Performance: Model 2c vs Model 2f",
+    align = "lcc",
+    format = "markdown",
+    row.names = FALSE  
+) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE,
+                position = "center") %>%
+  add_header_above(c("Metric" = 1, "Model 2c" = 1, "Model 2f" = 1)) %>%
+  footnote(general = "Model 2f includes additional credit variables (e.g., number of credit lines, mortgage performance). All metrics are based on threshold = 0.5.")
+
+# --- Question 3: Middle-class borrowers ---
+
+df_middle <- loanapplications %>% filter(appinc != 666)
+df_middle <- df_middle %>%
+  mutate(income_group = case_when(
+    appinc < quantile(appinc, 0.33) ~ "Low",
+    appinc < quantile(appinc, 0.66) ~ "Middle",
+    TRUE ~ "High"
+  ))
+
+group_summary <- df_middle %>%
+  group_by(income_group) %>%
+  summarize(avg_loan = mean(loanamt, na.rm = TRUE))
+
+# GRAPH 5: Loan amount distribution by income group
+p3 <- ggplot(df_middle, aes(x = income_group, y = loanamt)) +
+  geom_boxplot() +
+  labs(x = "Income Group", y = "Loan Amount", title = "Loan Amount Distribution by Income Group")
+
+print(p3)
+
+# --- Export regression tables to LaTeX ---
+# --- Question 3: Middle-class borrowers ---
+df_middle <- loanapplications %>% 
+  filter(appinc != 666, !is.na(appinc), !is.na(loanamt))
+
+
+income_quantiles <- quantile(df_middle$appinc, c(0.33, 0.66), na.rm = TRUE)
+
+df_middle <- df_middle %>%
+  mutate(income_group = case_when(
+    appinc < income_quantiles[1] ~ "Low",
+    appinc < income_quantiles[2] ~ "Middle",
+    TRUE ~ "High"
+  ))
+
+
+df_middle$income_group <- factor(df_middle$income_group, 
+                                 levels = c("Low", "Middle", "High"), 
+                                 ordered = TRUE)
+
+group_summary <- df_middle %>%
+  group_by(income_group) %>%
+  summarize(
+    avg_loan = mean(loanamt, na.rm = TRUE),
+    median_loan = median(loanamt, na.rm = TRUE),
+    count = n()
+  )
+print(group_summary)
+
+
+p3 <- ggplot(df_middle, aes(x = income_group, y = loanamt)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 4, color = "red") +
+
+  scale_y_continuous(trans = "log1p", labels = scales::dollar_format()) +
+  labs(
+    x = "Income Group", 
+    y = "Loan Amount (log scale)", 
+    title = "Loan Amount Distribution by Income Group",
+    subtitle = "Red diamonds show mean values"
+  ) +
+  theme_minimal(base_size = 12)
+
+print(p3)
+
+# --- Export regression tables to LaTeX ---
+
+tryCatch({
+  etable(
+    list(model_1a, model_1b, model_1c, model_1d,
+         model_lpm, model_probit, model_logit,
+         model_2c, model_2e, model_2f),
+    file = "regression_tables.tex",
+    title = "Regression Results for Homework 1",
+    tex = TRUE,
+    replace = TRUE
+  )
+}, error = function(e) {
+  message("导出表格时出错: ", e$message)
+
+  message("尝试分组导出...")
+  
+
+  tryCatch({
+    etable(
+      list(model_1a, model_1b, model_1c, model_1d),
+      file = "regression_tables_part1.tex",
+      title = "Regression Results - Continuous Dependent Variables",
+      tex = TRUE,
+      replace = TRUE
+    )
+    message("成功导出第一组模型")
+  }, error = function(e2) {
+    message("第一组导出失败: ", e2$message)
+  })
+  
+
+  tryCatch({
+    etable(
+      list(model_lpm, model_probit, model_logit, model_2c, model_2e, model_2f),
+      file = "regression_tables_part2.tex",
+      title = "Regression Results - Binary Dependent Variables",
+      tex = TRUE,
+      replace = TRUE
+    )
+    message("成功导出第二组模型")
+  }, error = function(e3) {
+    message("第二组导出失败: ", e3$message)
+  })
+})
